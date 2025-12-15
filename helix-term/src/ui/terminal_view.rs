@@ -58,6 +58,13 @@ impl TerminalView {
         self.focused = focused;
     }
 
+    /// Write data to the terminal PTY
+    pub fn write_to_pty(&mut self, data: &[u8]) -> std::io::Result<()> {
+        self.terminal
+            .write(data)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+    }
+
     /// Process any pending PTY output
     /// Returns true if any output was processed (for triggering redraw)
     pub fn process_pty_events(&mut self) -> bool {

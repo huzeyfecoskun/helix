@@ -1395,9 +1395,13 @@ impl Component for EditorView {
         let is_terminal_visible = self.terminal_panel.is_visible();
         let is_terminal_focused = self.terminal_panel.is_focused();
 
+        log::info!("handle_key_event: terminal_visible={}, terminal_focused={}", is_terminal_visible, is_terminal_focused);
+
         if is_terminal_visible && is_terminal_focused {
             if let Event::Key(mut key) = event.clone() {
                 canonicalize_key(&mut key);
+
+                log::info!("Terminal mode key event: {:?}", key);
 
                 // First, check for Terminal mode keybindings
                 let mut cx = commands::Context {
@@ -1409,15 +1413,15 @@ impl Component for EditorView {
                     jobs: context.jobs,
                 };
 
-                // Reset keymap state before looking up terminal keybindings
-                // to avoid interference from other modes' pending keys
-                self.keymaps.reset_state();
-
                 // Try to find a keybinding for this key in Terminal mode
+                // Don't reset keymap state - we need to preserve it for key sequences
                 let key_result = self.keymaps.get(Mode::Terminal, key);
+
+                log::info!("Terminal keymap result: {:?}", key_result);
 
                 match key_result {
                     KeymapResult::Matched(command) => {
+                        log::info!("Terminal matched command: {:?}", command);
                         command.execute(&mut cx);
                         let callbacks = std::mem::take(&mut cx.callback);
                         let callback = if callbacks.is_empty() {
@@ -1621,7 +1625,7 @@ impl Component for EditorView {
                 self.handle_idle_timeout(&mut cx)
             }
             Event::FocusGained => {
-                self.terminal_focused = true;
+                // Window focus gained - keep terminal_focused state as is
                 EventResult::Consumed(None)
             }
             Event::FocusLost => {
@@ -1635,7 +1639,7 @@ impl Component for EditorView {
                         context.editor.set_error(format!("{}", e));
                     }
                 }
-                self.terminal_focused = false;
+                // Window focus lost - keep terminal_focused state as is
                 EventResult::Consumed(None)
             }
         }

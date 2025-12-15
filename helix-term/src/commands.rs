@@ -624,6 +624,8 @@ impl MappableCommand {
         terminal_prev, "Switch to previous terminal tab",
         terminal_focus, "Focus the terminal panel",
         terminal_exit, "Exit terminal mode and return to editor",
+        terminal_palette, "Open terminal command palette",
+        terminal_run_script, "Run project scripts",
     );
 }
 
@@ -7104,5 +7106,274 @@ fn terminal_exit(cx: &mut Context) {
             editor_view.terminal_panel.set_focused(false);
             cx.editor.terminal_focused = false;
         }
+    }));
+}
+
+fn terminal_palette(cx: &mut Context) {
+    // Terminal palette options
+    #[derive(Clone)]
+    struct PaletteItem {
+        name: &'static str,
+        description: &'static str,
+        action: PaletteAction,
+    }
+
+    #[derive(Clone)]
+    enum PaletteAction {
+        RunScript,
+        NewTerminal,
+        CloseTerminal,
+        NextTerminal,
+        PrevTerminal,
+    }
+
+    let items = vec![
+        PaletteItem {
+            name: "run",
+            description: "Run project scripts (npm, cargo, make, etc.)",
+            action: PaletteAction::RunScript,
+        },
+        PaletteItem {
+            name: "new",
+            description: "Open a new terminal tab",
+            action: PaletteAction::NewTerminal,
+        },
+        PaletteItem {
+            name: "close",
+            description: "Close the current terminal tab",
+            action: PaletteAction::CloseTerminal,
+        },
+        PaletteItem {
+            name: "next",
+            description: "Switch to next terminal tab",
+            action: PaletteAction::NextTerminal,
+        },
+        PaletteItem {
+            name: "prev",
+            description: "Switch to previous terminal tab",
+            action: PaletteAction::PrevTerminal,
+        },
+    ];
+
+    let columns = [
+        ui::PickerColumn::new("command", |item: &PaletteItem, _| item.name.into()),
+        ui::PickerColumn::new("description", |item: &PaletteItem, _| {
+            item.description.into()
+        }),
+    ];
+
+    // Use current working directory - more reliable for terminal mode
+    let cwd = std::env::current_dir().ok();
+
+    cx.callback.push(Box::new(move |compositor, _cx| {
+        let cwd_inner = cwd.clone();
+        let picker = Picker::new(columns, 0, items, (), move |cx, item: &PaletteItem, _action| {
+            let cwd = cwd_inner.clone();
+            match item.action {
+                PaletteAction::RunScript => {
+                    // Picker will auto-close after this callback; just open the script picker next
+                    let cwd_for_callback = cwd.clone();
+                    let callback = async move {
+                        let call: Callback = Callback::EditorCompositor(Box::new(
+                            move |editor, compositor| {
+                                open_script_picker(editor, compositor, cwd_for_callback);
+                            },
+                        ));
+                        Ok(call)
+                    };
+                    cx.jobs.callback(callback);
+                }
+                PaletteAction::NewTerminal => {
+                    let cwd_for_callback = cwd.clone();
+                    let callback = async move {
+                        let call: Callback = Callback::EditorCompositor(Box::new(
+                            move |_editor, compositor| {
+                                if let Some(editor_view) = compositor.find::<crate::ui::EditorView>() {
+                                    if let Err(e) = editor_view.terminal_panel.new_terminal(cwd_for_callback, None) {
+                                        log::error!("Failed to create terminal: {}", e);
+                                    }
+                                }
+                            },
+                        ));
+                        Ok(call)
+                    };
+                    cx.jobs.callback(callback);
+                }
+                PaletteAction::CloseTerminal => {
+                    let callback = async move {
+                        let call: Callback = Callback::EditorCompositor(Box::new(
+                            move |_editor, compositor| {
+                                if let Some(editor_view) = compositor.find::<crate::ui::EditorView>() {
+                                    editor_view.terminal_panel.close_current();
+                                }
+                            },
+                        ));
+                        Ok(call)
+                    };
+                    cx.jobs.callback(callback);
+                }
+                PaletteAction::NextTerminal => {
+                    let callback = async move {
+                        let call: Callback = Callback::EditorCompositor(Box::new(
+                            move |_editor, compositor| {
+                                if let Some(editor_view) = compositor.find::<crate::ui::EditorView>() {
+                                    editor_view.terminal_panel.next_tab();
+                                }
+                            },
+                        ));
+                        Ok(call)
+                    };
+                    cx.jobs.callback(callback);
+                }
+                PaletteAction::PrevTerminal => {
+                    let callback = async move {
+                        let call: Callback = Callback::EditorCompositor(Box::new(
+                            move |_editor, compositor| {
+                                if let Some(editor_view) = compositor.find::<crate::ui::EditorView>() {
+                                    editor_view.terminal_panel.prev_tab();
+                                }
+                            },
+                        ));
+                        Ok(call)
+                    };
+                    cx.jobs.callback(callback);
+                }
+            }
+        });
+        compositor.push(Box::new(overlaid(picker)));
+    }));
+}
+
+fn open_script_picker(
+    editor: &mut Editor,
+    compositor: &mut Compositor,
+    cwd: Option<std::path::PathBuf>,
+) {
+    use crate::script_runner::{detect_scripts, find_project_root, ProjectScript};
+
+    log::info!("open_script_picker: cwd = {:?}", cwd);
+
+    let search_dir = cwd
+        .as_ref()
+        .and_then(|p| find_project_root(p))
+        .or_else(|| std::env::current_dir().ok());
+
+    log::info!("open_script_picker: search_dir = {:?}", search_dir);
+
+    let Some(project_root) = search_dir else {
+        editor.set_error("Could not find project root");
+        return;
+    };
+
+    log::info!("open_script_picker: project_root = {:?}", project_root);
+
+    let Some(result) = detect_scripts(&project_root) else {
+        editor.set_error("No project scripts found (package.json, Cargo.toml, Makefile, etc.)");
+        return;
+    };
+
+    log::info!("open_script_picker: found {} scripts", result.scripts.len());
+
+    if result.scripts.is_empty() {
+        editor.set_error("No scripts found in project");
+        return;
+    }
+
+    let scripts = result.scripts;
+    let project_root_for_picker = result.project_root.clone();
+
+    // Count unique project types for title
+    let mut project_types: Vec<String> = scripts
+        .iter()
+        .map(|s| s.project_type.to_string())
+        .collect();
+    project_types.sort();
+    project_types.dedup();
+    let project_types_str = project_types.join(", ");
+
+    let columns = [
+        ui::PickerColumn::new("idx", |item: &(usize, ProjectScript), _| {
+            format!("{}", item.0 + 1).into()
+        }),
+        ui::PickerColumn::new("source", |item: &(usize, ProjectScript), _| {
+            format!("[{}]", item.1.project_type).into()
+        }),
+        ui::PickerColumn::new("name", |item: &(usize, ProjectScript), _| {
+            item.1.name.clone().into()
+        }),
+        ui::PickerColumn::new("command", |item: &(usize, ProjectScript), _| {
+            item.1.command.clone().into()
+        }),
+    ];
+
+    let indexed_scripts: Vec<(usize, ProjectScript)> =
+        scripts.into_iter().enumerate().collect();
+
+    // Use Arc<AtomicBool> to prevent multiple executions
+    let executed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let picker = Picker::new(
+        columns,
+        0, // Primary column is idx for filtering by number
+        indexed_scripts,
+        (),
+        move |_cx, item: &(usize, ProjectScript), action| {
+            // Only run the script on Enter (Replace action), not on preview/selection changes
+            if !matches!(action, Action::Replace) {
+                return;
+            }
+
+            // Prevent multiple executions using atomic flag
+            if executed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                log::info!("Script picker: command already executed, skipping");
+                return;
+            }
+
+            let command = item.1.command.clone();
+            let cwd = project_root_for_picker.clone();
+
+            log::info!("Script picker: running command '{}' in {:?}", command, cwd);
+
+            // Use dispatch_blocking for a single synchronous execution
+            // Note: The picker closes itself after callback, no need to pop
+            crate::job::dispatch_blocking(move |editor, compositor| {
+                if let Some(editor_view) = compositor.find::<crate::ui::EditorView>() {
+                    // Create a new terminal if none exists
+                    if editor_view.terminal_panel.terminals_count() == 0 {
+                        if let Err(e) = editor_view.terminal_panel.new_terminal(Some(cwd.clone()), None) {
+                            log::error!("Failed to create terminal: {}", e);
+                            editor.set_error(format!("Failed to create terminal: {}", e));
+                            return;
+                        }
+                    }
+
+                    // Show terminal panel and focus it
+                    editor_view.terminal_panel.show();
+                    editor_view.terminal_panel.set_focused(true);
+                    editor.terminal_focused = true;
+
+                    // Send the command to terminal (only once)
+                    let cmd_with_newline = format!("{}\n", command);
+                    if let Err(e) = editor_view.terminal_panel.write_to_current(cmd_with_newline.as_bytes()) {
+                        log::error!("Failed to write to terminal: {}", e);
+                        editor.set_error(format!("Failed to run command: {}", e));
+                    }
+                }
+            });
+        },
+    );
+
+    let _title = format!("Run Script ({})", project_types_str);
+    compositor.push(Box::new(crate::ui::overlay::overlaid(picker)));
+}
+
+fn terminal_run_script(cx: &mut Context) {
+    // Use current working directory - this is more reliable for terminal mode
+    let cwd = std::env::current_dir().ok();
+
+    log::info!("terminal_run_script: cwd = {:?}", cwd);
+
+    cx.callback.push(Box::new(move |compositor, cx| {
+        open_script_picker(cx.editor, compositor, cwd);
     }));
 }

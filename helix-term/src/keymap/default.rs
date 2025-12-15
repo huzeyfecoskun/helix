@@ -421,6 +421,10 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
         "C-p" => terminal_prev,
         "C-S-t" => terminal_open,
         "C-w" => terminal_close,
+        "C-t" => { "Terminal palette"
+            "r" => terminal_run_script,
+            "t" => terminal_palette,
+        },
     });
     hashmap!(
         Mode::Normal => normal,

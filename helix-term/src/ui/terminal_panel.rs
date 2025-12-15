@@ -269,6 +269,18 @@ impl TerminalPanel {
         self.height_percent = (self.height_percent.saturating_sub(5)).max(10);
     }
 
+    /// Write bytes to the current terminal
+    pub fn write_to_current(&mut self, data: &[u8]) -> std::io::Result<()> {
+        if let Some(terminal) = self.terminals.get_mut(self.active_index) {
+            terminal.write_to_pty(data)
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "No active terminal",
+            ))
+        }
+    }
+
     /// Render the tab bar and update tab positions for click detection
     fn render_tab_bar(&mut self, area: Rect, surface: &mut Surface, theme: &helix_view::Theme) {
         // Use bufferline styles for consistency with editor tabs
